@@ -1,5 +1,6 @@
 using System.Numerics;
 using Content.Client.Weapons.Ranged.Systems;
+using Content.Shared._White.Other;
 using Content.Shared.Projectiles;
 using Content.Shared.Shuttles.BUIStates;
 using Content.Shared.Shuttles.Components;
@@ -166,7 +167,8 @@ public sealed partial class ShuttleNavControl : BaseShuttleControl
         var mapPos = _transform.ToMapCoordinates(_coordinates.Value);
         var posMatrix = Matrix3Helpers.CreateTransform(_coordinates.Value.Position, _rotation.Value);
         var ourEntRot = RotateWithEntity ? _transform.GetWorldRotation(xform) : _rotation.Value;
-        var ourEntMatrix = Matrix3Helpers.CreateTransform(_transform.GetWorldPosition(xform), ourEntRot);
+        var worldPosition = _transform.GetWorldPosition(xform); // WD EDIT
+        var ourEntMatrix = Matrix3Helpers.CreateTransform(worldPosition, ourEntRot);
         var shuttleToWorld = Matrix3x2.Multiply(posMatrix, ourEntMatrix);
         Matrix3x2.Invert(shuttleToWorld, out var worldToShuttle);
         var shuttleToView = Matrix3x2.CreateScale(new Vector2(MinimapScale, -MinimapScale)) * Matrix3x2.CreateTranslation(MidPointVector);
@@ -340,35 +342,65 @@ public sealed partial class ShuttleNavControl : BaseShuttleControl
         }
 
         // WD EDIT START
-        var multiply = Matrix3x2.Multiply(worldToShuttle, Matrix3x2.CreateScale(new Vector2(1,-1)));
-        var projectiles = _lookup.GetEntitiesInRange<ProjectileComponent>(_coordinates.Value, 256f);
-        var verts = new Vector2[projectiles.Count*4];
+        var multiply = Matrix3x2.Multiply(worldToShuttle, Matrix3x2.CreateScale(new Vector2(1, -1)));
+        var entities = _lookup.GetEntitiesInRange<RadarIconComponent>(_coordinates.Value, MaxRadarRange);
+        var projectileVertsByColor = new Dictionary<Color, List<Vector2>>();
 
-        var i = 0;
-        foreach (var proj in projectiles)
+        foreach (var entity in entities)
         {
-            if (EntManager.TryGetComponent<MapGridComponent>(_transform.GetParentUid(proj), out _))
+            if (EntManager.HasComponent<MapGridComponent>(_transform.GetParentUid(entity)) &&
+                !entity.Comp.ShowOnGrid)
                 continue;
 
-            var pos = ScalePosition(Vector2.Transform(_transform.GetWorldPosition(proj), multiply));
-            verts[i * 4] = pos + new Vector2(2, 2);
-            verts[i * 4+1] = pos + new Vector2(-2, -2);
-            verts[i * 4+2] = pos + new Vector2(2, -2);
-            verts[i * 4+3] = pos + new Vector2(-2, 2);
-            i++;
+            if (entity.Comp.Lines.Count == 0 || entity.Comp.Scale == Vector2.Zero)
+                continue;
+
+            var entityPosition = _transform.GetWorldPosition(entity);
+            if (entity.Comp.RadarRange > 0 && (entityPosition - worldPosition).Length() > entity.Comp.RadarRange)
+                continue;
+
+            var pos = ScalePosition(Vector2.Transform(entityPosition, multiply));
+
+            var iconAngle = entity.Comp.Angle;
+            var iconAngleRotated = iconAngle + ourEntRot - _transform.GetWorldRotation(entity);
+
+            var scale = entity.Comp.Scale;
+
+            foreach (var line in entity.Comp.Lines)
+            {
+                DebugTools.Assert(line.Points.Count >= 2, "A line in RadarIcon must have at least two points");
+                var verts = projectileVertsByColor.GetOrNew(line.Color ?? entity.Comp.Color);
+                
+                for(int i = 0; i < line.Points.Count; i++)
+                {
+                    var point = line.Points[i];
+                    point += entity.Comp.Offset + line.Offset;
+                    point *= entity.Comp.Scale * line.Scale;
+                    point.Y *= -1;
+                    var angle = (line.NoRot ? iconAngle : iconAngleRotated) + line.Angle;
+                    point = angle.RotateVec(point);
+                    verts.Add(pos + point);
+                    if(i > 0 && i < line.Points.Count - 1)     // add the same vert again to simulate LineList drawing mode without actually switching to it
+                        verts.Add(pos + point);   // this lets us draw all same-coloured lines in a single batch
+                }
+            }
         }
-        handle.DrawPrimitives(DrawPrimitiveTopology.LineList, verts, Color.Silver);
+
+        foreach (var (color, verts) in projectileVertsByColor)
+        {
+            DebugTools.Assert(verts.Count > 0);
+            handle.DrawPrimitives(DrawPrimitiveTopology.LineList, verts, color);
+        }
 
         if (FieldOfView < MathF.Tau)
         {
             const int segments = 5;
             var hidesey = new Vector2[segments + 2];
             hidesey[0] = MidPointVector;
-            for (i = 0; i < segments + 1; i++)
+            for (int i = 0; i < segments + 1; i++)
             {
                 var angle = i / (float) segments * (MathHelper.TwoPi - FieldOfView) + FieldOfView / 2;
                 var pos = new Vector2(MathF.Sin(angle), -MathF.Cos(angle));
-
                 hidesey[i + 1] = MidPointVector + pos * 1024;
             }
             handle.DrawPrimitives(DrawPrimitiveTopology.TriangleFan, hidesey, new Color(0.08f, 0.02f, 0.08f));
